@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+.next/
+dist/
+uploads/*
+exports/*
+temp/*
+!uploads/.gitkeep
+!exports/.gitkeep
+!temp/.gitkeep
+.env
+.env.local
+.agents
