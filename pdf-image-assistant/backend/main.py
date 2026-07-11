@@ -142,6 +142,124 @@ def save_embedded_image(doc: fitz.Document, xref: int, smask: int, output_path: 
     return output_path, ext
 
 
+def has_black_edge_background(image_bytes: bytes) -> bool:
+    """Detect logos whose PDF-level transparency is lost by raw JPEG extraction."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            rgb = image.convert("RGB")
+            width, height = rgb.size
+            if width < 8 or height < 8:
+                return False
+            step = max(1, min(width, height) // 80)
+            edge_pixels = []
+            for x in range(0, width, step):
+                edge_pixels.extend((rgb.getpixel((x, 0)), rgb.getpixel((x, height - 1))))
+            for y in range(step, height - 1, step):
+                edge_pixels.extend((rgb.getpixel((0, y)), rgb.getpixel((width - 1, y))))
+            dark = sum(1 for red, green, blue in edge_pixels if max(red, green, blue) <= 18)
+            return bool(edge_pixels) and dark / len(edge_pixels) >= 0.8
+    except Exception:
+        return False
+
+
+def save_displayed_image(page: fitz.Page, xref: int, width: int, height: int, output_path: Path) -> Path | None:
+    """Render an image placement as the PDF displays it, including PDF-level masks."""
+    rects = page.get_image_rects(xref)
+    if not rects:
+        return None
+    rect = max(rects, key=lambda item: item.width * item.height) & page.rect
+    if rect.is_empty or rect.width <= 0 or rect.height <= 0:
+        return None
+    zoom = max(width / rect.width, height / rect.height, 1.0)
+    zoom = min(zoom, 6.0)
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=rect, alpha=False, annots=False)
+    rendered_path = output_path.with_suffix(".png")
+    pix.save(rendered_path)
+    trim_to_light_panel(rendered_path)
+    return rendered_path
+
+
+def trim_to_light_panel(path: Path) -> None:
+    """Trim page scenery outside a light logo card while retaining its border."""
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+        width, height = image.size
+        if width < 40 or height < 40:
+            return
+
+        pixels = image.load()
+        sample_step = max(1, min(width, height) // 180)
+
+        def light(red: int, green: int, blue: int) -> bool:
+            return min(red, green, blue) >= 225 and max(red, green, blue) - min(red, green, blue) <= 24
+
+        def border_gold(red: int, green: int, blue: int) -> bool:
+            return 115 <= red <= 230 and red >= green + 22 and green >= blue + 18 and blue <= 135
+
+        sampled_rows = range(0, height, sample_step)
+        sampled_columns = range(0, width, sample_step)
+        row_count = len(sampled_rows)
+        column_count = len(sampled_columns)
+
+        gold_columns = [
+            x for x in range(width)
+            if sum(1 for y in sampled_rows if border_gold(*pixels[x, y])) / row_count >= 0.55
+        ]
+        gold_rows = [
+            y for y in range(height)
+            if sum(1 for x in sampled_columns if border_gold(*pixels[x, y])) / column_count >= 0.55
+        ]
+        if gold_columns and gold_rows:
+            left, right = min(gold_columns), max(gold_columns)
+            top, bottom = min(gold_rows), max(gold_rows)
+            if right - left >= width * 0.55 and bottom - top >= height * 0.55:
+                crop = (left, top, right + 1, bottom + 1)
+                if crop != (0, 0, width, height):
+                    image.crop(crop).save(path, format="PNG")
+                return
+
+        column_scores = []
+        for x in range(width):
+            column_scores.append(sum(1 for y in sampled_rows if light(*pixels[x, y])) / row_count)
+
+        row_scores = []
+        for y in range(height):
+            row_scores.append(sum(1 for x in sampled_columns if light(*pixels[x, y])) / column_count)
+
+        def longest_run(scores: list[float], threshold: float) -> tuple[int, int] | None:
+            best: tuple[int, int] | None = None
+            start: int | None = None
+            for index, score in enumerate([*scores, 0.0]):
+                if score >= threshold and start is None:
+                    start = index
+                elif score < threshold and start is not None:
+                    end = index - 1
+                    if best is None or end - start > best[1] - best[0]:
+                        best = (start, end)
+                    start = None
+            return best
+
+        column_run = longest_run(column_scores, 0.62)
+        row_run = longest_run(row_scores, 0.62)
+        if column_run is None or row_run is None:
+            return
+
+        left, right = column_run
+        top, bottom = row_run
+        if right - left < width * 0.55 or bottom - top < height * 0.55:
+            return
+
+        border_padding = max(2, round(min(width, height) * 0.012))
+        crop = (
+            max(0, left - border_padding),
+            max(0, top - border_padding),
+            min(width, right + border_padding + 1),
+            min(height, bottom + border_padding + 1),
+        )
+        if crop != (0, 0, width, height):
+            image.crop(crop).save(path, format="PNG")
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -231,7 +349,10 @@ def thumbnails(pdf_id: str) -> list[dict[str, Any]]:
 
 
 @app.post("/api/pdfs/{pdf_id}/extract-images")
-def extract_images(pdf_id: str) -> dict[str, Any]:
+def extract_images(pdf_id: str, precision: str = "high") -> dict[str, Any]:
+    precision = precision.lower()
+    if precision not in {"low", "balanced", "high"}:
+        raise HTTPException(status_code=400, detail="Precision must be low, balanced, or high.")
     item = get_pdf(pdf_id)
     export_dir = EXPORTS / pdf_id
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -252,12 +373,24 @@ def extract_images(pdf_id: str) -> dict[str, Any]:
                 if not image_bytes:
                     continue
                 ext = human_format(base.get("ext", "png"))
+                source_width = int(base.get("width", 0))
+                source_height = int(base.get("height", 0))
                 image_id = uuid4().hex
                 output_name = f"{Path(item['fileName']).stem}_page-{page_index + 1}_image-{image_index}.{ext}"
                 output_path = export_dir / output_name
 
                 try:
                     output_path, ext = save_embedded_image(doc, xref, smask, output_path)
+                    needs_display_render = precision == "high" or (
+                        precision == "balanced" and smask == 0 and ext == "jpg" and has_black_edge_background(image_bytes)
+                    )
+                    if needs_display_render:
+                        displayed_path = save_displayed_image(page, xref, source_width, source_height, output_path)
+                        if displayed_path is not None:
+                            if displayed_path != output_path and output_path.exists():
+                                output_path.unlink()
+                            output_path = displayed_path
+                            ext = "png"
                 except Exception:
                     continue
 
@@ -265,8 +398,8 @@ def extract_images(pdf_id: str) -> dict[str, Any]:
                     with Image.open(output_path) as pil_image:
                         width, height = pil_image.size
                 except Exception:
-                    width = int(base.get("width", 0))
-                    height = int(base.get("height", 0))
+                    width = source_width
+                    height = source_height
 
                 extracted.append(
                     {
@@ -284,13 +417,62 @@ def extract_images(pdf_id: str) -> dict[str, Any]:
                 )
 
     save_images(existing + extracted)
-    return {"count": len(extracted), "images": extracted}
+    return {"count": len(extracted), "precision": precision, "images": extracted}
 
 
 @app.get("/api/pdfs/{pdf_id}/images")
 def list_images(pdf_id: str) -> list[dict[str, Any]]:
     get_pdf(pdf_id)
     return [row for row in images() if row["pdfId"] == pdf_id]
+
+
+@app.post("/api/pdfs/{pdf_id}/page/{page_number}/extract-selection")
+async def extract_selection(pdf_id: str, page_number: int, payload: dict[str, Any]) -> dict[str, Any]:
+    coordinates = [float(payload.get(key, 0)) for key in ("x", "y", "width", "height")]
+    x, y, width, height = coordinates
+    if x < 0 or y < 0 or width <= 0 or height <= 0 or x + width > 1.001 or y + height > 1.001:
+        raise HTTPException(status_code=400, detail="Selection coordinates must be normalized values inside the page.")
+    if width < 0.005 or height < 0.005:
+        raise HTTPException(status_code=400, detail="The selected area is too small.")
+
+    item = get_pdf(pdf_id)
+    export_dir = EXPORTS / pdf_id
+    export_dir.mkdir(parents=True, exist_ok=True)
+    image_id = uuid4().hex
+    output_name = f"{Path(item['fileName']).stem}_page-{page_number}_manual-{image_id[:8]}.png"
+    output_path = export_dir / output_name
+
+    with open_doc(pdf_id) as doc:
+        if page_number < 1 or page_number > doc.page_count:
+            raise HTTPException(status_code=404, detail="Page number is out of range.")
+        page = doc.load_page(page_number - 1)
+        page_rect = page.rect
+        clip = fitz.Rect(
+            page_rect.x0 + x * page_rect.width,
+            page_rect.y0 + y * page_rect.height,
+            page_rect.x0 + (x + width) * page_rect.width,
+            page_rect.y0 + (y + height) * page_rect.height,
+        )
+        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), clip=clip, alpha=False, annots=False)
+        pix.save(output_path)
+
+    row = {
+        "id": image_id,
+        "pdfId": pdf_id,
+        "pageNumber": page_number,
+        "width": pix.width,
+        "height": pix.height,
+        "format": "PNG",
+        "fileSize": output_path.stat().st_size,
+        "path": str(output_path.relative_to(ROOT)).replace("\\", "/"),
+        "fileName": output_name,
+        "previewUrl": f"/api/images/{image_id}/preview",
+        "manual": True,
+    }
+    rows = images()
+    rows.append(row)
+    save_images(rows)
+    return row
 
 
 @app.get("/api/images/{image_id}/preview")

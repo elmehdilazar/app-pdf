@@ -3,6 +3,10 @@
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AlertCircle, CheckCircle2, UploadCloud } from "lucide-react";
+import { API_BASE } from "@/lib/api";
+
+const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
+const UPLOAD_API_BASE = API_BASE || "http://localhost:8000";
 
 export function PDFUploader() {
   const router = useRouter();
@@ -22,26 +26,39 @@ export function PDFUploader() {
         setError("Please choose a valid PDF file.");
         return;
       }
+      if (file.size > MAX_UPLOAD_BYTES) {
+        setError("PDF is too large. The local limit is 250 MB.");
+        return;
+      }
       setBusy(true);
       setProgress(15);
       const formData = new FormData();
       formData.append("file", file);
+      let timer: number | undefined;
       try {
-        const timer = window.setInterval(() => setProgress((value) => Math.min(value + 12, 88)), 220);
-        const response = await fetch("/api/upload", { method: "POST", body: formData });
-        window.clearInterval(timer);
+        timer = window.setInterval(() => setProgress((value) => Math.min(value + 12, 88)), 220);
+        const response = await fetch(`${UPLOAD_API_BASE}/api/upload`, { method: "POST", body: formData });
         if (!response.ok) {
-          const body = await response.json().catch(() => ({ detail: "Upload failed." }));
-          throw new Error(body.detail ?? "Upload failed.");
+          const responseText = await response.text();
+          let detail = responseText || `Upload failed (${response.status}).`;
+          try {
+            const body = JSON.parse(responseText) as { detail?: string };
+            detail = body.detail || detail;
+          } catch {
+            // Keep a plain-text server or proxy error when the response is not JSON.
+          }
+          throw new Error(detail);
         }
         const pdf = await response.json();
         setProgress(100);
         setMessage("Upload complete. Opening viewer...");
         setTimeout(() => router.push(`/viewer/${pdf.id}`), 450);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "The backend server may be offline.");
+        const detail = err instanceof Error ? err.message : "Unknown upload error.";
+        setError(detail === "Failed to fetch" ? "Cannot reach the PDF backend at http://localhost:8000. Start the backend and try again." : detail);
         setProgress(0);
       } finally {
+        if (timer !== undefined) window.clearInterval(timer);
         setBusy(false);
       }
     },

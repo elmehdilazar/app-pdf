@@ -13,7 +13,7 @@ export function PageThumbnailSidebar({
   onSelect: (page: number) => void;
 }) {
   return (
-    <aside className="hidden w-32 shrink-0 overflow-y-auto border-r border-line bg-white p-3 md:block">
+    <aside className="hidden min-h-0 w-32 shrink-0 overflow-y-auto overscroll-contain border-r border-line bg-white p-3 md:block">
       <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Pages</div>
       <div className="space-y-3">
         {thumbnails.map((thumbnail) => (

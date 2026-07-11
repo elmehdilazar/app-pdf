@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Download, Eraser, ImagePlus } from "lucide-react";
 import { fileUrl, formatBytes } from "@/lib/api";
+import type { ExtractionPrecision } from "@/lib/api";
 import type { ExtractedImage } from "@/lib/types";
 
 export function ExtractedImagePanel({
@@ -12,7 +13,9 @@ export function ExtractedImagePanel({
   filterPage,
   sort,
   loading,
+  extractionPrecision,
   onExtract,
+  onPrecision,
   onToggle,
   onPreview,
   onFilterPage,
@@ -25,7 +28,9 @@ export function ExtractedImagePanel({
   filterPage: string;
   sort: string;
   loading: boolean;
-  onExtract: () => void;
+  extractionPrecision: ExtractionPrecision;
+  onExtract: (precision: ExtractionPrecision) => void;
+  onPrecision: (precision: ExtractionPrecision) => void;
   onToggle: (image: ExtractedImage) => void;
   onPreview: (image: ExtractedImage) => void;
   onFilterPage: (value: string) => void;
@@ -86,7 +91,7 @@ export function ExtractedImagePanel({
   }
 
   return (
-    <aside className="flex w-full flex-col border-l border-line bg-white lg:w-96">
+    <aside className="flex min-h-0 w-full flex-col overflow-hidden border-l border-line bg-white lg:w-96">
       <div className="border-b border-line p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -94,7 +99,7 @@ export function ExtractedImagePanel({
             <p className="text-xs text-slate-500">{images.length} embedded image{images.length === 1 ? "" : "s"}</p>
           </div>
           <div className="flex flex-col gap-2">
-            <button className="control-primary" onClick={onExtract} disabled={loading}>
+            <button className="control-primary" onClick={() => onExtract(extractionPrecision)} disabled={loading}>
               <ImagePlus size={15} /> {loading ? "Extracting" : "Extract"}
             </button>
             <button className="control" onClick={downloadSelected} disabled={selectedCount === 0 || downloading}>
@@ -105,6 +110,25 @@ export function ExtractedImagePanel({
             </button>
           </div>
         </div>
+        <label className="mt-3 block text-xs font-medium text-slate-600">
+          Extraction precision
+          <select
+            className="mt-1 h-9 w-full rounded-md border border-line px-2 text-sm text-ink"
+            value={extractionPrecision}
+            onChange={(event) => onPrecision(event.target.value as ExtractionPrecision)}
+            disabled={loading}
+          >
+            <option value="low">Low — fast, raw embedded image</option>
+            <option value="balanced">Balanced — fix transparency when needed</option>
+            <option value="high">High — exact PDF appearance and crop</option>
+            <option value="manual">Manual — drag an exact area on the page</option>
+          </select>
+        </label>
+        <p className="mt-1 text-xs text-slate-500">
+          {extractionPrecision === "manual"
+            ? "Click Extract, then drag a rectangle over the exact area you want."
+            : "Use High for logos, masks, and precise card borders. Use Low to preserve original embedded bytes."}
+        </p>
         <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
           <label className="block text-xs font-medium text-slate-600">
             Download format
@@ -142,7 +166,7 @@ export function ExtractedImagePanel({
           </select>
         </div>
       </div>
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-4">
         {filtered.length === 0 ? (
           <div className="rounded-md border border-dashed border-line p-6 text-center text-sm text-slate-500">
             No images to show. Extract images from the PDF or change the filter.
