@@ -22,11 +22,22 @@ export const api = {
   getPdf: (pdfId: string) => request<PDFDocument>(`/api/pdfs/${pdfId}`, { cache: "no-store" }),
   deletePdf: (pdfId: string) => request<{ status: string }>(`/api/pdfs/${pdfId}`, { method: "DELETE" }),
   thumbnails: (pdfId: string) => request<Thumbnail[]>(`/api/pdfs/${pdfId}/thumbnails`, { cache: "no-store" }),
-  extractImages: (pdfId: string) =>
-    request<{ count: number; images: ExtractedImage[] }>(`/api/pdfs/${pdfId}/extract-images`, { method: "POST" }),
+  extractImages: (pdfId: string, precision: ExtractionPrecision) =>
+    request<{ count: number; precision: ExtractionPrecision; images: ExtractedImage[] }>(
+      `/api/pdfs/${pdfId}/extract-images?precision=${precision}`,
+      { method: "POST" }
+    ),
+  extractSelection: (pdfId: string, page: number, selection: ManualSelection) =>
+    request<ExtractedImage>(`/api/pdfs/${pdfId}/page/${page}/extract-selection`, {
+      method: "POST",
+      body: JSON.stringify(selection)
+    }),
   images: (pdfId: string) => request<ExtractedImage[]>(`/api/pdfs/${pdfId}/images`, { cache: "no-store" }),
   text: (pdfId: string) => request<{ pdfId: string; pages: { pageNumber: number; text: string }[]; text: string }>(`/api/pdfs/${pdfId}/text`)
 };
+
+export type ExtractionPrecision = "low" | "balanced" | "high" | "manual";
+export type ManualSelection = { x: number; y: number; width: number; height: number };
 
 export function fileUrl(path: string): string {
   return `${API_BASE}${path}`;
