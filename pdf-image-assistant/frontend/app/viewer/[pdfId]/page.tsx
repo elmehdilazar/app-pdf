@@ -15,10 +15,18 @@ import { api, fileUrl } from "@/lib/api";
 import type { ExtractionPrecision, ManualSelection } from "@/lib/api";
 import type { ExtractedImage, PDFDocument, Thumbnail } from "@/lib/types";
 
+type CropDrag = {
+  mode: "new" | "move" | "resize";
+  handle?: "nw" | "ne" | "sw" | "se";
+  start: { x: number; y: number };
+  initial: ManualSelection;
+};
+
 export default function ViewerPage() {
   const params = useParams<{ pdfId: string }>();
   const pdfId = params.pdfId;
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const pageImageRef = useRef<HTMLDivElement | null>(null);
   const [pdf, setPdf] = useState<PDFDocument | null>(null);
   const [thumbnails, setThumbnails] = useState<Thumbnail[]>([]);
   const [images, setImages] = useState<ExtractedImage[]>([]);
@@ -35,7 +43,7 @@ export default function ViewerPage() {
   const [extracting, setExtracting] = useState(false);
   const [extractionPrecision, setExtractionPrecision] = useState<ExtractionPrecision>("high");
   const [manualMode, setManualMode] = useState(false);
-  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const [cropDrag, setCropDrag] = useState<CropDrag | null>(null);
   const [manualSelection, setManualSelection] = useState<ManualSelection | null>(null);
   const [error, setError] = useState("");
 
@@ -84,12 +92,56 @@ export default function ViewerPage() {
     }
   }
 
-  function pointerPosition(event: React.PointerEvent<HTMLDivElement>) {
-    const rect = event.currentTarget.getBoundingClientRect();
+  function pointerPosition(clientX: number, clientY: number) {
+    const rect = pageImageRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
     return {
-      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
-      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))
+      x: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height))
     };
+  }
+
+  function beginCropDrag(event: React.PointerEvent<HTMLElement>, mode: CropDrag["mode"], handle?: CropDrag["handle"]) {
+    if (!manualMode) return;
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const point = pointerPosition(event.clientX, event.clientY);
+    const initial = manualSelection ?? { x: point.x, y: point.y, width: 0, height: 0 };
+    setCropDrag({ mode, handle, start: point, initial });
+    if (mode === "new") setManualSelection(initial);
+  }
+
+  function updateCropDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (!manualMode || !cropDrag) return;
+    const point = pointerPosition(event.clientX, event.clientY);
+    const { initial, start, mode, handle } = cropDrag;
+    if (mode === "new") {
+      setManualSelection({
+        x: Math.min(start.x, point.x),
+        y: Math.min(start.y, point.y),
+        width: Math.abs(point.x - start.x),
+        height: Math.abs(point.y - start.y)
+      });
+      return;
+    }
+    if (mode === "move") {
+      setManualSelection({
+        ...initial,
+        x: Math.max(0, Math.min(1 - initial.width, initial.x + point.x - start.x)),
+        y: Math.max(0, Math.min(1 - initial.height, initial.y + point.y - start.y))
+      });
+      return;
+    }
+
+    let left = initial.x;
+    let top = initial.y;
+    let right = initial.x + initial.width;
+    let bottom = initial.y + initial.height;
+    if (handle?.includes("w")) left = Math.min(point.x, right);
+    if (handle?.includes("e")) right = Math.max(point.x, left);
+    if (handle?.includes("n")) top = Math.min(point.y, bottom);
+    if (handle?.includes("s")) bottom = Math.max(point.y, top);
+    setManualSelection({ x: left, y: top, width: right - left, height: bottom - top });
   }
 
   async function saveManualSelection() {
@@ -166,25 +218,12 @@ export default function ViewerPage() {
               )}
               <div ref={canvasRef} className="relative flex min-h-0 flex-1 items-start justify-center overflow-auto overscroll-contain bg-slate-100 p-6">
                 <div
+                  ref={pageImageRef}
                   className={`relative shrink-0 ${manualMode ? "cursor-crosshair touch-none select-none" : ""}`}
-                  onPointerDown={(event) => {
-                    if (!manualMode) return;
-                    event.currentTarget.setPointerCapture(event.pointerId);
-                    const point = pointerPosition(event);
-                    setDragStart(point);
-                    setManualSelection({ ...point, width: 0, height: 0 });
-                  }}
-                  onPointerMove={(event) => {
-                    if (!manualMode || !dragStart) return;
-                    const point = pointerPosition(event);
-                    setManualSelection({
-                      x: Math.min(dragStart.x, point.x),
-                      y: Math.min(dragStart.y, point.y),
-                      width: Math.abs(point.x - dragStart.x),
-                      height: Math.abs(point.y - dragStart.y)
-                    });
-                  }}
-                  onPointerUp={() => setDragStart(null)}
+                  onPointerDown={(event) => beginCropDrag(event, "new")}
+                  onPointerMove={updateCropDrag}
+                  onPointerUp={() => setCropDrag(null)}
+                  onPointerCancel={() => setCropDrag(null)}
                 >
                   <img
                     className="block max-w-none rounded-md bg-white shadow-panel"
@@ -201,7 +240,8 @@ export default function ViewerPage() {
                   )}
                   {manualSelection && (
                     <div
-                      className="pointer-events-none absolute z-10 border-2 border-cyan-400 bg-cyan-300/10 shadow-[0_0_0_9999px_rgba(15,23,42,0.48)]"
+                      className="absolute z-10 cursor-move border-2 border-cyan-400 bg-cyan-300/10 shadow-[0_0_0_9999px_rgba(15,23,42,0.48)]"
+                      onPointerDown={(event) => beginCropDrag(event, "move")}
                       style={{
                         left: `${manualSelection.x * 100}%`,
                         top: `${manualSelection.y * 100}%`,
@@ -209,10 +249,10 @@ export default function ViewerPage() {
                         height: `${manualSelection.height * 100}%`
                       }}
                     >
-                      <span className="absolute -left-1.5 -top-1.5 h-3 w-3 rounded-sm border border-white bg-cyan-500 shadow" />
-                      <span className="absolute -right-1.5 -top-1.5 h-3 w-3 rounded-sm border border-white bg-cyan-500 shadow" />
-                      <span className="absolute -bottom-1.5 -left-1.5 h-3 w-3 rounded-sm border border-white bg-cyan-500 shadow" />
-                      <span className="absolute -bottom-1.5 -right-1.5 h-3 w-3 rounded-sm border border-white bg-cyan-500 shadow" />
+                      <button aria-label="Resize from top left" className="absolute -left-2 -top-2 h-4 w-4 cursor-nwse-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", "nw")} />
+                      <button aria-label="Resize from top right" className="absolute -right-2 -top-2 h-4 w-4 cursor-nesw-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", "ne")} />
+                      <button aria-label="Resize from bottom left" className="absolute -bottom-2 -left-2 h-4 w-4 cursor-nesw-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", "sw")} />
+                      <button aria-label="Resize from bottom right" className="absolute -bottom-2 -right-2 h-4 w-4 cursor-nwse-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", "se")} />
                       {manualSelection.width > 0.01 && manualSelection.height > 0.01 && (
                         <span className="absolute left-1/2 top-2 -translate-x-1/2 whitespace-nowrap rounded bg-slate-950/80 px-2 py-1 text-[11px] font-semibold text-white">
                           {Math.round(manualSelection.width * 100)}% × {Math.round(manualSelection.height * 100)}%
@@ -223,7 +263,7 @@ export default function ViewerPage() {
                 </div>
                 {manualMode && (
                   <div className="sticky right-3 top-3 ml-3 flex flex-col gap-2 rounded-md border border-cyan-200 bg-white p-3 shadow-panel">
-                    <p className="max-w-48 text-xs text-slate-600">Drag over the exact page area to extract.</p>
+                    <p className="max-w-52 text-xs text-slate-600">Drag to select. Move the box or resize it with the corner handles.</p>
                     <button className="control-primary" disabled={!manualSelection || manualSelection.width < 0.005 || manualSelection.height < 0.005 || extracting} onClick={saveManualSelection}>
                       {extracting ? "Saving..." : "Save selected area"}
                     </button>
