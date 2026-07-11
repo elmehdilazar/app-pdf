@@ -16,6 +16,7 @@ import type { ExtractionPrecision, ManualSelection } from "@/lib/api";
 import type { ExtractedImage, PDFDocument, Thumbnail } from "@/lib/types";
 
 type CropDrag = {
+  index: number;
   mode: "new" | "move" | "resize";
   handle?: "nw" | "ne" | "sw" | "se";
   start: { x: number; y: number };
@@ -44,7 +45,7 @@ export default function ViewerPage() {
   const [extractionPrecision, setExtractionPrecision] = useState<ExtractionPrecision>("high");
   const [manualMode, setManualMode] = useState(false);
   const [cropDrag, setCropDrag] = useState<CropDrag | null>(null);
-  const [manualSelection, setManualSelection] = useState<ManualSelection | null>(null);
+  const [manualSelections, setManualSelections] = useState<ManualSelection[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -74,7 +75,7 @@ export default function ViewerPage() {
   async function extract(precision: ExtractionPrecision) {
     if (precision === "manual") {
       setRotate(0);
-      setManualSelection(null);
+      setManualSelections([]);
       setManualMode(true);
       setError("");
       return;
@@ -101,22 +102,30 @@ export default function ViewerPage() {
     };
   }
 
-  function beginCropDrag(event: React.PointerEvent<HTMLElement>, mode: CropDrag["mode"], handle?: CropDrag["handle"]) {
+  function beginCropDrag(event: React.PointerEvent<HTMLElement>, mode: CropDrag["mode"], index?: number, handle?: CropDrag["handle"]) {
     if (!manualMode) return;
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = pointerPosition(event.clientX, event.clientY);
-    const initial = manualSelection ?? { x: point.x, y: point.y, width: 0, height: 0 };
-    setCropDrag({ mode, handle, start: point, initial });
-    if (mode === "new") setManualSelection(initial);
+    const selectionIndex = mode === "new" ? manualSelections.length : (index ?? 0);
+    const initial = mode === "new"
+      ? { x: point.x, y: point.y, width: 0, height: 0 }
+      : manualSelections[selectionIndex];
+    if (!initial) return;
+    setCropDrag({ index: selectionIndex, mode, handle, start: point, initial });
+    if (mode === "new") setManualSelections((current) => [...current, initial]);
+  }
+
+  function updateManualSelection(index: number, selection: ManualSelection) {
+    setManualSelections((current) => current.map((item, itemIndex) => itemIndex === index ? selection : item));
   }
 
   function updateCropDrag(event: React.PointerEvent<HTMLDivElement>) {
     if (!manualMode || !cropDrag) return;
     const point = pointerPosition(event.clientX, event.clientY);
-    const { initial, start, mode, handle } = cropDrag;
+    const { index, initial, start, mode, handle } = cropDrag;
     if (mode === "new") {
-      setManualSelection({
+      updateManualSelection(index, {
         x: Math.min(start.x, point.x),
         y: Math.min(start.y, point.y),
         width: Math.abs(point.x - start.x),
@@ -125,7 +134,7 @@ export default function ViewerPage() {
       return;
     }
     if (mode === "move") {
-      setManualSelection({
+      updateManualSelection(index, {
         ...initial,
         x: Math.max(0, Math.min(1 - initial.width, initial.x + point.x - start.x)),
         y: Math.max(0, Math.min(1 - initial.height, initial.y + point.y - start.y))
@@ -141,18 +150,19 @@ export default function ViewerPage() {
     if (handle?.includes("e")) right = Math.max(point.x, left);
     if (handle?.includes("n")) top = Math.min(point.y, bottom);
     if (handle?.includes("s")) bottom = Math.max(point.y, top);
-    setManualSelection({ x: left, y: top, width: right - left, height: bottom - top });
+    updateManualSelection(index, { x: left, y: top, width: right - left, height: bottom - top });
   }
 
-  async function saveManualSelection() {
-    if (!manualSelection) return;
+  async function saveManualSelections() {
+    const validSelections = manualSelections.filter((selection) => selection.width >= 0.005 && selection.height >= 0.005);
+    if (validSelections.length === 0) return;
     try {
       setExtracting(true);
-      const image = await api.extractSelection(pdfId, page, manualSelection);
-      setImages((current) => [...current, image]);
-      setSelectedIds((current) => new Set([...current, image.id]));
+      const extracted = await Promise.all(validSelections.map((selection) => api.extractSelection(pdfId, page, selection)));
+      setImages((current) => [...current, ...extracted]);
+      setSelectedIds((current) => new Set([...current, ...extracted.map((image) => image.id)]));
       setManualMode(false);
-      setManualSelection(null);
+      setManualSelections([]);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Manual extraction failed.");
@@ -231,43 +241,54 @@ export default function ViewerPage() {
                     src={fileUrl(`/api/pdfs/${pdfId}/page/${page}/render?zoom=${zoom}&rotate=${rotate}`)}
                     alt={`Rendered page ${page}`}
                   />
-                  {manualMode && !manualSelection && (
+                  {manualMode && manualSelections.length === 0 && (
                     <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/25">
                       <span className="rounded-md border border-white/70 bg-slate-950/75 px-4 py-2 text-sm font-semibold text-white shadow-lg">
                         Click and drag to mark an extraction area
                       </span>
                     </div>
                   )}
-                  {manualSelection && (
+                  {manualSelections.map((selection, index) => (
                     <div
-                      className="absolute z-10 cursor-move border-2 border-cyan-400 bg-cyan-300/10 shadow-[0_0_0_9999px_rgba(15,23,42,0.48)]"
-                      onPointerDown={(event) => beginCropDrag(event, "move")}
+                      key={index}
+                      className="absolute z-10 cursor-move border-2 border-cyan-400 bg-cyan-300/10 shadow-[0_0_0_9999px_rgba(15,23,42,0.16)]"
+                      onPointerDown={(event) => beginCropDrag(event, "move", index)}
                       style={{
-                        left: `${manualSelection.x * 100}%`,
-                        top: `${manualSelection.y * 100}%`,
-                        width: `${manualSelection.width * 100}%`,
-                        height: `${manualSelection.height * 100}%`
+                        left: `${selection.x * 100}%`,
+                        top: `${selection.y * 100}%`,
+                        width: `${selection.width * 100}%`,
+                        height: `${selection.height * 100}%`
                       }}
                     >
-                      <button aria-label="Resize from top left" className="absolute -left-2 -top-2 h-4 w-4 cursor-nwse-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", "nw")} />
-                      <button aria-label="Resize from top right" className="absolute -right-2 -top-2 h-4 w-4 cursor-nesw-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", "ne")} />
-                      <button aria-label="Resize from bottom left" className="absolute -bottom-2 -left-2 h-4 w-4 cursor-nesw-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", "sw")} />
-                      <button aria-label="Resize from bottom right" className="absolute -bottom-2 -right-2 h-4 w-4 cursor-nwse-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", "se")} />
-                      {manualSelection.width > 0.01 && manualSelection.height > 0.01 && (
-                        <span className="absolute left-1/2 top-2 -translate-x-1/2 whitespace-nowrap rounded bg-slate-950/80 px-2 py-1 text-[11px] font-semibold text-white">
-                          {Math.round(manualSelection.width * 100)}% × {Math.round(manualSelection.height * 100)}%
+                      <button aria-label="Resize from top left" className="absolute -left-2 -top-2 h-4 w-4 cursor-nwse-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", index, "nw")} />
+                      <button aria-label="Resize from top right" className="absolute -right-2 -top-2 h-4 w-4 cursor-nesw-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", index, "ne")} />
+                      <button aria-label="Resize from bottom left" className="absolute -bottom-2 -left-2 h-4 w-4 cursor-nesw-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", index, "sw")} />
+                      <button aria-label="Resize from bottom right" className="absolute -bottom-2 -right-2 h-4 w-4 cursor-nwse-resize rounded-sm border border-white bg-cyan-500 shadow" onPointerDown={(event) => beginCropDrag(event, "resize", index, "se")} />
+                      <button
+                        aria-label={`Remove selection ${index + 1}`}
+                        className="absolute -right-3 -top-8 flex h-6 min-w-6 items-center justify-center rounded bg-red-600 px-1.5 text-xs font-bold text-white shadow"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setManualSelections((current) => current.filter((_, itemIndex) => itemIndex !== index));
+                        }}
+                      >×</button>
+                      {selection.width > 0.01 && selection.height > 0.01 && (
+                        <span className="pointer-events-none absolute left-1/2 top-2 -translate-x-1/2 whitespace-nowrap rounded bg-slate-950/80 px-2 py-1 text-[11px] font-semibold text-white">
+                          {index + 1} · {Math.round(selection.width * 100)}% × {Math.round(selection.height * 100)}%
                         </span>
                       )}
                     </div>
-                  )}
+                  ))}
                 </div>
                 {manualMode && (
                   <div className="sticky right-3 top-3 ml-3 flex flex-col gap-2 rounded-md border border-cyan-200 bg-white p-3 shadow-panel">
-                    <p className="max-w-52 text-xs text-slate-600">Drag to select. Move the box or resize it with the corner handles.</p>
-                    <button className="control-primary" disabled={!manualSelection || manualSelection.width < 0.005 || manualSelection.height < 0.005 || extracting} onClick={saveManualSelection}>
-                      {extracting ? "Saving..." : "Save selected area"}
+                    <p className="max-w-52 text-xs text-slate-600">Drag anywhere outside a box to add another selection. Move, resize, or remove each box.</p>
+                    <span className="text-xs font-semibold text-brand">{manualSelections.filter((selection) => selection.width >= 0.005 && selection.height >= 0.005).length} areas selected</span>
+                    <button className="control-primary" disabled={!manualSelections.some((selection) => selection.width >= 0.005 && selection.height >= 0.005) || extracting} onClick={saveManualSelections}>
+                      {extracting ? "Saving..." : "Save all selected areas"}
                     </button>
-                    <button className="control" onClick={() => { setManualMode(false); setManualSelection(null); }}>Cancel</button>
+                    <button className="control" onClick={() => { setManualMode(false); setManualSelections([]); }}>Cancel</button>
                   </div>
                 )}
               </div>
